@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Voxel Builder - Tahap 4 (Hologram Text)</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #050505;
+      }
+      #videoWebcam {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        width: 200px;
+        border: 2px solid cyan;
+        border-radius: 10px;
+        transform: scaleX(-1);
+        z-index: 10;
+      }
+      /* INI GAYA TULISAN HOLOGRAMNYA BRE */
+      #teksJarvis {
+        position: absolute;
+        top: 80%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #00ffff;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 40px;
+        font-weight: bold;
+        text-shadow: 0 0 15px #00ffff;
+        z-index: 20;
+        pointer-events: none;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="videoWebcam" autoplay playsinline></video>
+
+    <div id="teksJarvis">SYSTEM STANDBY...</div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="script.js"></script>
+  </body>
+</html>
