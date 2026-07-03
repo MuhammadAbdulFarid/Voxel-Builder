@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gesture Blur Cam</title>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"
+      crossorigin="anonymous"
+    ></script>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background: #0f1115;
+        color: #eee;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        padding: 20px;
+      }
+      h1 {
+        font-size: 18px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        color: #fff;
+      }
+      p.sub {
+        color: #999;
+        font-size: 13px;
+        margin-top: 0;
+        margin-bottom: 16px;
+      }
+      .stage {
+        position: relative;
+        width: min(90vw, 400px);
+        aspect-ratio: 3/4;
+        border-radius: 22px;
+        overflow: hidden;
+        background: #000;
+        box-shadow:
+          0 16px 48px rgba(0, 0, 0, 0.75),
+          0 0 0 1px rgba(255, 255, 255, 0.08);
+      }
+      video {
+        display: none;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .badge {
+        position: absolute;
+        top: 14px;
+        left: 14px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        font-size: 13px;
+        font-weight: 600;
+        backdrop-filter: blur(6px);
+        background: rgba(0, 0, 0, 0.5);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        transition: all 0.25s ease;
+      }
+      .badge.normal {
+        color: #9ee6a0;
+      }
+      .badge.blur {
+        color: #7db8ff;
+      }
+      .badge.fist {
+        color: #ff8a8a;
+      }
+      .fps {
+        position: absolute;
+        top: 14px;
+        right: 14px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        font-size: 11px;
+        color: #888;
+        background: rgba(0, 0, 0, 0.4);
+      }
+      .legend {
+        margin-top: 18px;
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        justify-content: center;
+        font-size: 13px;
+        color: #bbb;
+      }
+      .legend div span {
+        font-weight: 600;
+        color: #fff;
+      }
+      .status-line {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #777;
+      }
+      button {
+        margin-top: 16px;
+        padding: 10px 18px;
+        border-radius: 10px;
+        border: none;
+        background: #3a6df0;
+        color: white;
+        font-weight: 600;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      button:hover {
+        background: #2f5cd6;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>🖐️ Gesture Blur Cam</h1>
+    <p class="sub">
+      Deteksi gesture tangan realtime — dioptimasi buat performa ringan
+    </p>
+
+    <div class="stage">
+      <video class="input_video" autoplay playsinline muted></video>
+      <canvas id="output_canvas"></canvas>
+      <div id="badge" class="badge normal">Menunggu kamera…</div>
+      <div id="fps" class="fps">-- fps</div>
+    </div>
+
+    <div class="legend">
+      <div>✌️ <span>Telunjuk + tengah</span> → kamera blur</div>
+      <div>✊ <span>Genggam/kepal</span> → suara "Saya akan lawan!"</div>
+      <div>🖐️ <span>Lainnya</span> → normal</div>
+      <div>
+        �️ <span>Tangan normal (tahan setelah gesture aktif)</span> → tutup
+        kamera
+      </div>
+    </div>
+    <div class="status-line" id="statusLine">
+      Klik tombol untuk mulai kamera
+    </div>
+    <button id="startBtn">Mulai Kamera</button>
+
+    <script>
+      const videoElement = document.querySelector(".input_video");
+      const canvasElement = document.getElementById("output_canvas");
+      const ctx = canvasElement.getContext("2d", { alpha: false });
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      // Canvas kecil khusus inferensi MediaPipe — video asli tetap full-res untuk tampilan
+      const inferCanvas = document.createElement("canvas");
+      inferCanvas.width = 320;
+      inferCanvas.height = 240;
+      const inferCtx2d = inferCanvas.getContext("2d");
+      const badge = document.getElementById("badge");
+      const statusLine = document.getElementById("statusLine");
+      const startBtn = document.getElementById("startBtn");
+      const fpsEl = document.getElementById("fps");
+
+      let currentBlur = 0;
+      let displayBlur = 0;
+      let confirmedGesture = "normal";
+      let pendingGesture = "normal";
+      let pendingCount = 0;
+      const DEBOUNCE_FRAMES = 2;
+
+      // Timer gestur normal untuk tutup kamera (7 detik, sama seperti idle)
+      let normalStartTime = null; // kapan mulai tahan normal setelah gestur aktif
+      const NORMAL_CLOSE_MS = 7000; // 7000 ms = 7 detik
+      let hadActiveGesture = false;
+
+      // Auto-close jika tidak ada tangan terdeteksi selama 7 detik
+      let lastHandTime = performance.now();
+
+      let frameCount = 0,
+        lastFpsTime = performance.now();
+
+      // --- Audio: loop selama gesture aktif, berhenti saat kembali normal ---
+      const audioBlur = new Audio("WhatsApp Video 2026-07-02 at 22.57.34.mp4");
+      const audioFist = new Audio("WhatsApp Video 2026-07-02 at 23.00.31.mp4");
+      audioBlur.loop = true;
+      audioFist.loop = true;
+      audioBlur.preload = "auto";
+      audioFist.preload = "auto";
+
+      function playSound(audio) {
+        // hentikan audio LAIN saja, jangan yang ini
+        [audioBlur, audioFist].forEach((a) => {
+          if (a !== audio) {
+            a.pause();
+            a.currentTime = 0;
+          }
+        });
+        if (audio.paused) {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        }
+      }
+
+      function stopCamera() {
+        if (camera) {
+          camera.stop();
+          camera = null;
+        }
+        isProcessing = false;
+        [audioBlur, audioFist].forEach((a) => {
+          a.pause();
+          a.currentTime = 0;
+        });
+        confirmedGesture = "normal";
+        pendingGesture = "normal";
+        pendingCount = 0;
+        hadActiveGesture = false;
+        normalStartTime = null;
+        lastHandTime = performance.now();
+        currentBlur = 0;
+        displayBlur = 0;
+        ctx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        badge.className = "badge normal";
+        badge.textContent = "🖐️ Kamera ditutup";
+        fpsEl.textContent = "-- fps";
+        statusLine.textContent =
+          "Kamera dimatikan — klik tombol untuk mulai lagi";
+        startBtn.style.display = "";
+        startBtn.disabled = false;
+      }
+
+      // --- Deteksi jari menggunakan tip, PIP, dan MCP — lebih tajam, tahan miring ---
+      function d2(a, b) {
+        return (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+      }
+
+      // Jari lurus: SATU syarat — tip lebih jauh dari wrist dibanding PIP-nya
+      // Threshold 1.15 (kuadrat) ≈ 1.07 linear — cukup permisif, tahan orientasi miring
+      function isExtended(
+        lm,
+        tip,
+        pip /*, mcp diabaikan — tetap bisa dipanggil 4 argumen */,
+      ) {
+        return d2(lm[tip], lm[0]) > d2(lm[pip], lm[0]) * 1.15;
+      }
+
+      // Jari mengkepal: tip tidak melewati MCP terlalu jauh dari wrist
+      // 1.6 kuadrat ≈ 1.26 linear — lebih permisif, mudah terdeteksi meski tangan tidak tertutup sempurna
+      function isCurled(lm, tip, mcp) {
+        return d2(lm[tip], lm[0]) < d2(lm[mcp], lm[0]) * 1.6;
+      }
+
+      function classifyGesture(lm) {
+        const iUp = isExtended(lm, 8, 6, 5);
+        const mUp = isExtended(lm, 12, 10, 9);
+        const iDn = isCurled(lm, 8, 5);
+        const mDn = isCurled(lm, 12, 9);
+        const rDn = isCurled(lm, 16, 13);
+        const pDn = isCurled(lm, 20, 17);
+
+        // Kecualikan thumbs-up dari fist: cek jempol tidak teracung
+        const ref = d2(lm[0], lm[9]);
+        const thumbOut = ref > 0.0001 && d2(lm[4], lm[0]) / ref > 2.5;
+
+        if (iDn && mDn && rDn && pDn && !thumbOut) return "fist"; // ✊ kepalan
+        if (iUp && mUp && rDn && pDn) return "blur"; // ✌️ peace
+        return "normal";
+      }
+
+      function setBadge(state) {
+        badge.classList.remove("normal", "blur", "fist");
+        if (state === "blur") {
+          badge.textContent = "✌️ Blur aktif";
+          badge.classList.add("blur");
+          currentBlur = 18;
+        } else if (state === "fist") {
+          badge.textContent = "✊ Saya akan lawan!";
+          badge.classList.add("fist");
+          currentBlur = 0;
+        } else {
+          badge.textContent = "🖐️ Normal";
+          badge.classList.add("normal");
+          currentBlur = 0;
+        }
+      }
+
+      // --- Efek muka bingung di canvas saat fist (TikTok style) ---
+      function drawFistFaceEffect(w, h) {
+        const t = performance.now() / 1000;
+        const baseSize = Math.round(h * 0.2);
+        const pulse = 1 + Math.sin(t * 7) * 0.07; // denyut cepat biar kesan panik
+        const faceSize = Math.round(baseSize * pulse);
+
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        // Posisi muka: tengah horizontal, 28% dari atas (tipikal posisi wajah selfie)
+        const cx = w / 2;
+        const cy = h * 0.28;
+
+        // Emoji muka bingung
+        ctx.font = `${faceSize}px serif`;
+        ctx.globalAlpha = 0.92;
+        ctx.fillText("😵", cx, cy);
+
+        // Tanda tanya melayang memutar (3 buah)
+        const marks = ["?", "?!", "..."];
+        const orbitR = baseSize * 0.8;
+        marks.forEach((c, i) => {
+          const angle = t * 1.5 + i * ((Math.PI * 2) / marks.length);
+          const mx = cx + Math.cos(angle) * orbitR;
+          const my = cy + Math.sin(angle) * orbitR * 0.45;
+          const qs = Math.round(baseSize * 0.32);
+          ctx.font = `bold ${qs}px sans-serif`;
+          ctx.globalAlpha = 0.85;
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "#000";
+          ctx.fillStyle = "#ffe94d";
+          ctx.strokeText(c, mx, my);
+          ctx.fillText(c, mx, my);
+        });
+
+        ctx.restore();
+      }
+
+      function onResults(results) {
+        // Portrait canvas 3:4 — center-crop dari video landscape 640×480
+        const CW = 360,
+          CH = 480;
+        if (canvasElement.width !== CW) canvasElement.width = CW;
+        if (canvasElement.height !== CH) canvasElement.height = CH;
+
+        const allLandmarks = results.multiHandLandmarks || [];
+
+        // --- Auto-close idle: tidak ada tangan >= 7 detik ---
+        if (allLandmarks.length > 0) {
+          lastHandTime = performance.now();
+        } else {
+          const idleMs = performance.now() - lastHandTime; // dalam milidetik
+          if (idleMs >= 7000) {
+            stopCamera();
+            return;
+          } // 7000 ms = 7 detik
+          if (idleMs >= 5000) {
+            // peringatan mulai detik ke-5
+            badge.className = "badge normal";
+            badge.textContent = `⏱️ Idle ${Math.ceil((7000 - idleMs) / 1000)}s…`;
+          }
+        }
+
+        // --- Klasifikasi gesture satu tangan dengan debounce ---
+        const raw =
+          allLandmarks.length > 0 ? classifyGesture(allLandmarks[0]) : "normal";
+
+        if (raw === pendingGesture) {
+          pendingCount++;
+        } else {
+          pendingGesture = raw;
+          pendingCount = 1;
+        }
+
+        if (pendingCount >= DEBOUNCE_FRAMES && raw !== confirmedGesture) {
+          confirmedGesture = raw;
+          setBadge(confirmedGesture);
+          if (confirmedGesture === "blur") playSound(audioBlur);
+          else if (confirmedGesture === "fist") playSound(audioFist);
+        }
+
+        // Normal tahan 7 detik setelah gesture aktif → tutup kamera
+        if (confirmedGesture !== "normal") {
+          hadActiveGesture = true;
+          normalStartTime = null; // reset timer setiap kali ada gesture aktif
+        } else if (hadActiveGesture) {
+          if (normalStartTime === null) normalStartTime = performance.now();
+          const heldMs = performance.now() - normalStartTime;
+          const pct = Math.min(
+            100,
+            Math.round((heldMs / NORMAL_CLOSE_MS) * 100),
+          );
+          badge.textContent = `🖐️ Tahan… ${pct}%`;
+          if (heldMs >= NORMAL_CLOSE_MS) {
+            stopCamera();
+            return;
+          }
+        }
+
+        displayBlur += (currentBlur - displayBlur) * 0.35;
+
+        // Gambar langsung dari videoElement full-res (bukan results.image 320×240)
+        // Center-crop portrait: ambil CW×CH dari tengah video landscape
+        const VW = videoElement.videoWidth || 640;
+        const VH = videoElement.videoHeight || 480;
+        const srcW = Math.min(CW, VW);
+        const srcH = Math.min(CH, VH);
+        const cropX = Math.round((VW - srcW) / 2);
+        const cropY = Math.round((VH - srcH) / 2);
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.save();
+        ctx.filter = displayBlur > 0.5 ? `blur(${displayBlur}px)` : "none";
+        ctx.translate(CW, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(videoElement, cropX, cropY, srcW, srcH, 0, 0, CW, CH);
+        ctx.restore();
+
+        if (confirmedGesture === "fist") drawFistFaceEffect(CW, CH);
+
+        frameCount++;
+        const now = performance.now();
+        if (now - lastFpsTime >= 500) {
+          fpsEl.textContent =
+            Math.round((frameCount * 1000) / (now - lastFpsTime)) + " fps";
+          frameCount = 0;
+          lastFpsTime = now;
+        }
+      }
+
+      const hands = new Hands({
+        locateFile: (f) =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
+      });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5, // sedikit longgar -> tracking lebih cepat ikut gerakan tangan
+      });
+      hands.onResults(onResults);
+
+      let camera = null;
+      let isProcessing = false; // lock: cegah frame menumpuk saat MediaPipe masih sibuk
+
+      startBtn.addEventListener("click", async () => {
+        startBtn.disabled = true;
+        statusLine.textContent = "Meminta akses kamera…";
+        try {
+          camera = new Camera(videoElement, {
+            onFrame: async () => {
+              if (document.visibilityState !== "visible") return;
+              if (isProcessing) return; // buang frame ini, jangan queue
+              isProcessing = true;
+              try {
+                // Kirim frame 320×240 ke MediaPipe (cepat), tampilan tetap dari full-res video
+                inferCtx2d.drawImage(videoElement, 0, 0, 320, 240);
+                await hands.send({ image: inferCanvas });
+              } finally {
+                isProcessing = false;
+              }
+            },
+            width: 640, // kualitas tampilan lebih tinggi
+            height: 480,
+          });
+          await camera.start();
+          lastHandTime = performance.now(); // reset idle timer saat kamera baru nyala
+          statusLine.textContent = "Kamera aktif — coba gesture tanganmu";
+          startBtn.style.display = "none";
+        } catch (err) {
+          statusLine.textContent = "Gagal akses kamera: " + err.message;
+          startBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
